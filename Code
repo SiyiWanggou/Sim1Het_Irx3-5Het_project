@@ -48,6 +48,9 @@ HSMM_all <- reduceDimension(HSMM_all, max_components = 2,
                             min_dist = 0.1,
                             n_neighbors = 30,
                             verbose = T)
+#------Generate 6 clusters
+HSMM_all <- clusterCells(HSMM_all, method = 'densityPeak', res = 1e-4, verbose = T, num_clusters = 6)
+pData(HSMM_all)$Ori_6_clusters <- pData(HSMM_all)$Cluster
 
 #------Generate 16 clusters (Figure 1 A)
 HSMM_all <- clusterCells(HSMM_all, method = 'densityPeak', res = 1e-4, verbose = T)#,num_clusters = 16)

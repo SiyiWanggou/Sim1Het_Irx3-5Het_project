@@ -1,0 +1,569 @@
+#Protocol to generate the results for CC's single cell RNAseq data. 
+#Introduction:
+#The single cell RNAseq pinpline can be used for the following aspects:
+  #1. Clustering the cells.
+  #2. Find the marker genes of each clusters.
+  #3. Determining the cell fates and pseudotime of all the cells.
+  #4. Comparing the DE genes between cell fates.
+  #5. Find DE genes between different genotypes (Groups or conditions)
+#Software used for the following protocol: Monocle3, Monocle2.
+  #Monocle3 should be installed on ubuntu operation system. 
+  #Monocle2 can be used on windows system.
+  #Monocle2 and Monocle3-alpha are two different softwares based on identical dependencies
+
+#Charpter 1. Data Preparation
+#Data files that would be used in this protocol are listed below:
+Annotation_cell_matrix_all.txt
+Annotation_genes_all.txt
+Gene_Map_for_metabolism_and_mitochodrial.txt
+pData_HSMM_all_for_trajectory.txt
+Top1000_gene_cluster.txt
+
+#Charpter 2. ----------Generating different clusters of cells-----------
+#Move to monocle3-alpha
+setwd("/mnt/hgfs/share/1st_level_analysis")
+library(monocle)
+library("ggthemes")
+library("RColorBrewer")
+library(VGAM)
+library(Cairo)
+HSMM_expr_all<-read.delim("Matrix_all.txt",header=T,row.names = 1) 
+HSMM_sample_sheet_all<-read.delim("Annotation_cells_matrix_all.txt",header=T,row.names = 1) 
+HSMM_gene_annotation_all<-read.delim("Annotation_genes_all.txt",header=T,row.names = 1) 
+pd<-new("AnnotatedDataFrame",data = HSMM_sample_sheet_all)
+fd<-new("AnnotatedDataFrame",data = HSMM_gene_annotation_all)
+HSMM_all<-newCellDataSet(as.matrix(HSMM_expr_all),
+                         phenoData = pd,
+                         featureData = fd,
+                         lowerDetectionLimit = 0.1, 
+                         expressionFamily = negbinomial.size()) 
+HSMM_all <- estimateSizeFactors(HSMM_all)
+HSMM_all <- estimateDispersions(HSMM_all)
+HSMM_all <- detectGenes(HSMM_all,min_expr = 0.1) 
+expressed_genes <- row.names(subset(fData(HSMM_all),num_cells_expressed >=10)) 
+HSMM_all <- setOrderingFilter(HSMM_all,expressed_genes) 
+HSMM_all <- preprocessCDS(HSMM_all, method = 'PCA', norm_method = 'log', num_dim = 50, verbose = T, pseudo_expr = 1, residualModelFormulaStr = "~num_genes_expressed")
+HSMM_all <- reduceDimension(HSMM_all, max_components = 2,
+                            reduction_method = 'UMAP',
+                            min_dist = 0.1,
+                            n_neighbors = 30,
+                            verbose = T)
+
+#------Generate 16 clusters (Figure 1 A)
+HSMM_all <- clusterCells(HSMM_all, method = 'densityPeak', res = 1e-4, verbose = T)#,num_clusters = 16)
+Cairo(file="Plot_UMAP_6Cluster_16subgroup.png",type="png",units="in",bg="white",width=4.5,height=5.4,pointsize=10,dpi=300)
+plot_cell_clusters(HSMM_all, 1, 2, color_by = "Cluster", cell_size = 0.5) + 
+  #facet_wrap(~Group) +
+  theme(legend.text=element_text(size=3)) + #set the size of the text
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))  #put the color legend on the right
+#geom_rug()
+dev.off()
+
+#-------Identify Marker Genes for each Clusters (Figure 1 E)
+spatial_res <- principalGraphTest(HSMM_all, relative_expr = TRUE, method = c("Moran_I"), k = 25, cores = detectCores() - 2, verbose = T) 
+cluster_marker_res <- find_cluster_markers(HSMM_all,
+                                           spatial_res,
+                                           group_by = 'Cluster',
+                                           morans_I_threshold = 0.25)
+write.table(cluster_marker_res,"markers_of_each_sub_cluster.txt",sep='\t',quote=FALSE,col.names = TRUE,row.names = TRUE)
+
+genes <- cluster_marker_res %>%
+  dplyr::group_by(Group) %>% dplyr::slice(which(specificity > 0.5))
+write.table(genes,"markers_of_each_sub_cluster_chosen.txt",sep='\t',quote=FALSE,col.names = TRUE,row.names = TRUE)
+Cairo(file="Plot_Marker_genes_by_group.png",type="png",units="in",bg="white",width=25,height=8,pointsize=10,dpi=300)
+plot_markers_by_group(HSMM_all, genes$gene_short_name, group_by = "Cluster",ordering_type = 'maximal_on_diag',
+                      axis_order = 'marker_group',
+                      flip_percentage_mean = TRUE) +
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+genes <- cluster_marker_res %>%
+  dplyr::filter(specificity > 0.5) %>%
+  dplyr::group_by(Group) %>%
+  dplyr::arrange(Group, dplyr::desc(specificity))
+Cairo(file="Plot_Marker_cluster_by_gene.png",type="png",units="in",bg="white",width=18,height=8,pointsize=10,dpi=300)
+plot_markers_cluster(HSMM_all,
+                        as.character(genes$gene_short_name),
+                        minimal_cluster_fraction = 0.01,
+                        show_rownames = T,
+                        group_by = "Cluster",
+                        scale_max = 3,
+                        scale_min = -3,
+                        return_heatmap = TRUE)
+dev.off()
+
+#------Plot markers for each clusters (Figure 1 B)
+marker_genes <- c("Map2","Tubb3","Cartpt","Zic1","Zic4","Avp","Oxt","Cga","Map2","Tubb3")
+Cairo(file="Plot_Marker_Neuron.png",type="png",units="in",bg="white",width=8,height=8,pointsize=5,dpi=300)
+plot_cell_clusters(HSMM_all,
+                   markers = as.character(marker_genes),
+                   show_group_id = T, cell_size = 0.75) +
+  #scale_colour_gradient("blue",high="Red") +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Save the pData(HSMM_all) file for statistics (Figure 1 C)
+write.table(pData(HSMM_all),"statistics.txt",sep='\t',quote=FALSE,col.names = TRUE,row.names = TRUE)
+
+#------Plot top4 marker for each clusters
+top_cluster1 <- genes %>% dplyr::filter(Group == 1) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster2 <- genes %>% dplyr::filter(Group == 2) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster3 <- genes %>% dplyr::filter(Group == 3) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster4 <- genes %>% dplyr::filter(Group == 4) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster5 <- genes %>% dplyr::filter(Group == 5) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster6 <- genes %>% dplyr::filter(Group == 6) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster7 <- genes %>% dplyr::filter(Group == 7) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster8 <- genes %>% dplyr::filter(Group == 8) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster9 <- genes %>% dplyr::filter(Group == 9) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster10 <- genes %>% dplyr::filter(Group == 10) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster11 <- genes %>% dplyr::filter(Group == 11) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster12 <- genes %>% dplyr::filter(Group == 12) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster13 <- genes %>% dplyr::filter(Group == 13) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster14 <- genes %>% dplyr::filter(Group == 14) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster15 <- genes %>% dplyr::filter(Group == 15) %>% dplyr::top_n(n=4,wt = specificity)
+top_cluster16 <- genes %>% dplyr::filter(Group == 16) %>% dplyr::top_n(n=4,wt = specificity)
+Cairo(file="Plot_Marker_Cluster1.png",type="png",units="in",bg="white",width=4.5,height=4.85,pointsize=5,dpi=300)
+plot_cell_clusters(HSMM_all,markers = as.character(top_cluster1$Gene),show_group_id = T, cell_size = 0.5) +
+  #scale_colour_gradient("blue",high="Red") +
+  theme(legend.position="top",panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+......
+Cairo(file="Plot_Marker_Cluster16.png",type="png",units="in",bg="white",width=4.5,height=4.85,pointsize=5,dpi=300)
+plot_cell_clusters(HSMM_all,markers = as.character(top_cluster16$Gene),show_group_id = T, cell_size = 0.5) +
+  #scale_colour_gradient("blue",high="Red") +
+  theme(legend.position="top",panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#Charpter 3. ----------Identify Cell Fates-----------
+#Move to monocle2 for the following analysis
+setwd("E:/ubuntu18/share/1st_level_analysis")
+HSMM_expr_all<-read.delim("Matrix_all.txt",header=T,row.names = 1)
+HSMM_sample_sheet_all<-read.delim("pData_HSMM_all_for_trajectory.txt",header=T,row.names = 1) 
+HSMM_gene_annotation_all<-read.delim("Annotation_genes_all.txt",header=T,row.names = 1) 
+pd<-new("AnnotatedDataFrame",data = HSMM_sample_sheet_all)
+fd<-new("AnnotatedDataFrame",data = HSMM_gene_annotation_all)
+HSMM_all<-newCellDataSet(as.matrix(HSMM_expr_all),
+                         phenoData = pd,
+                         featureData = fd,
+                         lowerDetectionLimit = 0.1,
+                         expressionFamily = negbinomial.size())
+HSMM_all <- estimateSizeFactors(HSMM_all)
+HSMM_all <- estimateDispersions(HSMM_all)
+HSMM_all <- detectGenes(HSMM_all,min_expr = 0.1)
+expressed_genes <- row.names(subset(fData(HSMM_all),num_cells_expressed >=10))
+clustering_DEG_genes <- differentialGeneTest(HSMM_all[expressed_genes,],
+                                            fullModelFormulaStr = '~Ori_6_Cluster')
+write.table(clustering_DEG_genes,"DE_Gene_based_on_6_clusters.txt",sep='\t',quote=FALSE,col.names = TRUE,row.names = TRUE)
+clustering_DEG_genes <- read.delim("DE_Gene_based_on_6_clusters.txt",header=T,row.names = 1)
+clustering_DEG_genes <- subset(clustering_DEG_genes,qval < 0.01)
+Gene_index <- row.names(clustering_DEG_genes)[order(clustering_DEG_genes$qval)][1:1000]
+HSMM_all <- setOrderingFilter(HSMM_all,Gene_index) 
+HSMM_all <- reduceDimension(HSMM_all, max_components = 2, num_dim = 6, norm_method = c("log"), pseudo_expr = 1,
+                            reduction_method = 'DDRTree', verbose = T, residualModelFormulaStr = "~num_genes_expressed", cores = detectCores() - 2)
+HSMM_all <- orderCells(HSMM_all)
+
+#------plot trajectory by state (Figure 2 A)
+Cairo(file="Plot_Trajectory_by_state1.png",type="png",units="in",bg="white",width=4.5,height=4.85,pointsize=5,dpi=300)
+plot_cell_trajectory(HSMM_all, 1, 2, color_by = "State", cell_size = 0.5,state_number_size = 0.1,show_branch_points = TRUE) + 
+  #facet_wrap(~Group) +
+  stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.text=element_text(size=3)) + 
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Plot expression of Sox2 in trajectory plot (Figure 2 B)
+target<-which(rownames(exprs(HSMM_all))=="Sox2")
+pData(HSMM_all)$Sox2<-exprs(HSMM_all)[target,]
+mean<-(max(pData(HSMM_all)$Sox2)+min(pData(HSMM_all)$Sox2))/2
+Cairo(file="Plot_Trajectory_Sox2_all.png",type="png",units="in",bg="white",width=4.5,height=5.2,pointsize=10,dpi=300)
+plot_cell_trajectory(HSMM_all, color_by = "Sox2", cell_size = 1) + 
+  scale_colour_gradient2(low="white",mid="Magenta2",high="Red",midpoint = 1.25,limits = c(0,2.5)) +
+  #facet_wrap(~Group) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Plot Pseudotime of Trajectory (Figure 2 C)
+Sox2_id <- row.names(subset(fData(HSMM_all),gene_short_name == "Sox2"))
+Dcx_id <- row.names(subset(fData(HSMM_all),gene_short_name == "Dcx"))
+cth <- newCellTypeHierarchy()
+cth <- addCellType(cth, "Stem-like", classify_func = function(x) { x[Sox2_id,] >= 1 })
+cth <- addCellType(cth, "Immature-Neurons", classify_func = function(x) { x[Sox2_id,] < 1 & x[Dcx_id,] >= 1})
+cth <- addCellType(cth, "Differentiated", classify_func = function(x) { x[Sox2_id,] < 1 & x[Dcx_id,] < 1})
+HSMM_all <- classifyCells(HSMM_all, cth, 0.1)
+#Pick up the root from trajectory
+GM_state <- function(cds){
+  if (length(unique(pData(cds)$State)) > 1){
+    T0_counts <- table(pData(cds)$State, pData(cds)$CellType)[,"Differentiated"]
+    return(as.numeric(names(T0_counts)[which(T0_counts == min(T0_counts))]))
+  } else {
+    return (1)
+  }
+}
+HSMM_all <- orderCells(HSMM_all, root_state = GM_state(HSMM_all))
+Average <- (max(pData(HSMM_all)$Pseudotime)+min(pData(HSMM_all)$Pseudotime))/2
+Cairo(file="Plot_Trajectory_Pseudotime_all.png",type="png",units="in",bg="white",width=4.5,height=5,pointsize=10,dpi=300)
+plot_cell_trajectory(HSMM_all, 1, 2, color_by = "Pseudotime", cell_size = 1,nrow = 2)+ 
+  scale_colour_gradient2(low="yellow",mid="Magenta2",high="red",midpoint = Average) +
+  #facet_wrap(~Group) +
+  stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Identify DE genes between Cell fate1 and Cell fate 2.
+BEAM_res <- BEAM(HSMM_all[expressed_genes,], branch_point = 1,cores = 10)
+Sig_BEAM_res <- subset(BEAM_res,qval < 0.01)
+write.table(Sig_BEAM_res,"DE_genes_based_on_Branchpoint.txt",sep='\t',quote=FALSE,col.names = TRUE,row.names = TRUE)
+
+#------Plot top 600 DE genes between Cell fate 1 and Cell fate 2. (Figure 2 D)
+Top_600_BEAM_genes <- Sig_BEAM_res[1:600,]
+Cairo(file="Plot_BEAM_Gene_Top600.png",type="png",units="in",bg="white",width=7,height=45,pointsize=10,dpi=300)
+plot_genes_branched_heatmap(HSMM_all[row.names(Top_600_BEAM_genes),],
+                                 branch_point = 1, num_clusters = 12, cores = 2, use_gene_short_name = T,
+                                 show_rownames = T, return_heatmap =TRUE)
+dev.off()
+
+#------Identify gene feature of Cell Fates-------
+#Use top 1000 genes to identify feature genes of each cell fate.Then use enrichment analysis to describe the charater of each cell fate.
+Top_1000_BEAM_genes <- Sig_BEAM_res[1:1000,]
+Cairo(file="Plot_BEAM_Gene_Top1000.png",type="png",units="in",bg="white",width=7,height=70,pointsize=10,dpi=300)
+a <- plot_genes_branched_heatmap(HSMM_all[row.names(Top_1000_BEAM_genes),],
+                                 branch_point = 1, num_clusters = 12, cores = 2, use_gene_short_name = T,
+                                 show_rownames = T, return_heatmap =TRUE)
+a$g
+dev.off()
+write.table(a$annotation_row,"Top1000_gene_cluster.txt",sep='\t',quote=FALSE,col.names = TRUE,row.names = TRUE)
+##reclass the genes in Top1000_gene_cluster.txt file via Plot_BEAM_Gene_Top1000.png heatmap in excel.
+
+#------Enrichment analysis based on Top1000_DE_genes between Cell Fates.
+Signature <- read.delim("Top1000_gene_cluster.txt",header=TRUE,row.names = 1)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(GSEABase)
+library(biomaRt)
+SYMBOL<-rownames(Signature)
+human=useMart("ensembl",dataset="hsapiens_gene_ensembl")
+class(human)
+mouse=useMart("ensembl",dataset="mmusculus_gene_ensembl")
+class(mouse)
+SYMBOLmouse<-getLDS(attributes=c("mgi_symbol"),filters="mgi_symbol",
+                     values=SYMBOL,mart=mouse,
+                     attributesL=c("hgnc_symbol","chromosome_name","start_position","end_position"),
+                     martL=human,
+                     uniqueRows = T)
+colnames(SYMBOLmouse)<-c("gene_name","Gene","Chromosome_name","Start_position","End_position")
+Signature$gene_name <- rownames(Signature)
+Signature_Human <- merge(Signature, SYMBOLmouse, by="gene_name")
+Fate1_Signature <- subset(Signature_Human,Signature == "Cell_Fate_1")
+Fate2_Signature <- subset(Signature_Human,Signature == "Cell_Fate_2")
+Pre_branch_Signature <- subset(Signature_Human,Signature == "Pre_branch")
+
+#-------load GSEA map
+gmtfileH<-system.file("extdata","h.all.v6.2.symbols.gmt",package="clusterProfiler")
+hk<-read.gmt(gmtfileH)
+gmtfilec2<-system.file("extdata","c2.all.v6.2.symbols.gmt",package="clusterProfiler")
+c2<-read.gmt(gmtfilec2)
+gmtfilec2cp<-system.file("extdata","c2.cp.v6.2.symbols.gmt",package="clusterProfiler")
+c2cp<-read.gmt(gmtfilec2cp)
+gmtfilemiRNA<-system.file("extdata","c5.all.v6.2.symbols.gmt",package="clusterProfiler")
+c5<-read.gmt(gmtfilemiRNA)
+
+#------Enrichment analysis of Fate1
+symbol_fate1 <- Fate1_Signature$Gene
+egSymol_fate1 <- bitr(symbol_fate1,fromType="SYMBOL",toType="ENTREZID",OrgDb="org.Hs.eg.db")
+egSymol_fate1hk <- enricher(egSymol_fate1$SYMBOL,TERM2GENE = hk)
+write.table(egSymol_fate1hk,"egSymol_fate1hk.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_fate1hk.png",type="png",units="in",bg="white",width=16,height=16,pointsize=16,dpi=300)
+dotplot(egSymol_fate1hk,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_fate1c2 <- enricher(egSymol_fate1$SYMBOL,TERM2GENE = c2)
+write.table(egSymol_fate1c2,"egSymol_fate1c2.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_fate1c2.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_fate1c2,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_fate1c2cp <- enricher(egSymol_fate1$SYMBOL,TERM2GENE = c2cp)
+write.table(egSymol_fate1c2cp,"egSymol_fate1c2cp.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_fate1c2cp.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_fate1c2cp,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_fate1c5 <- enricher(egSymol_fate1$SYMBOL,TERM2GENE = c5)
+write.table(egSymol_fate1c5,"egSymol_fate1c5.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_fate1c5.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_fate1c5,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+
+#------Plot top20 GO pathways (Figure 2 E)
+Cairo(file="egSymol_fate1c5_top20.png",type="png",units="in",bg="white",width=11,height=6,pointsize=16,dpi=300)
+dotplot(egSymol_fate1c5,color="p.adjust",showCategory=20,font.size=12)
+dev.off()
+
+#------Enrichment analysis of Fate2
+symbol_fate2 <- Fate2_Signature$Gene
+egSymol_fate2 <- bitr(symbol_fate2,fromType="SYMBOL",toType="ENTREZID",OrgDb="org.Hs.eg.db")
+egSymol_fate2hk <- enricher(egSymol_fate2$SYMBOL,TERM2GENE = hk)
+write.table(egSymol_fate2hk,"egSymol_fate2hk.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_fate2hk.png",type="png",units="in",bg="white",width=16,height=16,pointsize=16,dpi=300)
+dotplot(egSymol_fate2hk,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_fate2c2 <- enricher(egSymol_fate2$SYMBOL,TERM2GENE = c2)
+write.table(egSymol_fate2c2,"egSymol_fate2c2.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_fate2c2.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_fate2c2,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_fate2c2cp <- enricher(egSymol_fate2$SYMBOL,TERM2GENE = c2cp)
+write.table(egSymol_fate2c2cp,"egSymol_fate2c2cp.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_fate2c2cp.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_fate2c2cp,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_fate2c5 <- enricher(egSymol_fate2$SYMBOL,TERM2GENE = c5)
+write.table(egSymol_fate2c5,"egSymol_fate2c5.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_fate2c5.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_fate2c5,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+
+#------Plot top20 GO pathways (Figure 2 F)
+Cairo(file="egSymol_fate2c5_top20.png",type="png",units="in",bg="white",width=12.5,height=6,pointsize=16,dpi=300)
+dotplot(egSymol_fate2c5,color="p.adjust",showCategory=20,font.size=12)
+dev.off()
+
+#------Enrichment analysis of Pre_branch
+symbol_Pre_branch <- Pre_branch_Signature$Gene
+egSymol_Pre_branch <- bitr(symbol_Pre_branch,fromType="SYMBOL",toType="ENTREZID",OrgDb="org.Hs.eg.db")
+egSymol_Pre_branchhk <- enricher(egSymol_Pre_branch$SYMBOL,TERM2GENE = hk)
+write.table(egSymol_Pre_branchhk,"egSymol_Pre_branchhk.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_Pre_branchhk.png",type="png",units="in",bg="white",width=16,height=16,pointsize=16,dpi=300)
+dotplot(egSymol_Pre_branchhk,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_Pre_branchc2 <- enricher(egSymol_Pre_branch$SYMBOL,TERM2GENE = c2)
+write.table(egSymol_Pre_branchc2,"egSymol_Pre_branchc2.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_Pre_branchc2.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_Pre_branchc2,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_Pre_branchc2cp <- enricher(egSymol_Pre_branch$SYMBOL,TERM2GENE = c2cp)
+write.table(egSymol_Pre_branchc2cp,"egSymol_Pre_branchc2cp.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_Pre_branchc2cp.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_Pre_branchc2cp,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+egSymol_Pre_branchc5 <- enricher(egSymol_Pre_branch$SYMBOL,TERM2GENE = c5)
+write.table(egSymol_Pre_branchc5,"egSymol_Pre_branchc2c5.txt",col.names = TRUE,row.names = TRUE,quote=FALSE,sep="\t")
+Cairo(file="egSymol_Pre_branchc5.png",type="png",units="in",bg="white",width=16,height=40,pointsize=16,dpi=300)
+dotplot(egSymol_Pre_branchc5,color="p.adjust",showCategory=355,font.size=12)
+dev.off()
+
+#------Plot top20 GO pathways (Figure 2 G)
+Cairo(file="egSymol_Pre_branchc5_top20.png",type="png",units="in",bg="white",width=10.2,height=6,pointsize=16,dpi=300)
+dotplot(egSymol_Pre_branchc5,color="p.adjust",showCategory=20,font.size=12)
+dev.off()
+
+#------Plot DE gene heatmap of metabolism and mitochodrial between cell fate (Figure 2 H)
+Gene <- read.delim("Gene_Map_for_metabolism_and_mitochodrial.txt",header=T)
+Gene <- unique(Gene)
+rownames(Gene) <- Gene$Gene
+Target_genes <- merge(Gene,Signature_Human,by='Gene',all=FALSE)
+Cairo(file="Plot_BEAM_Metabolism_and_mitochodiral_Genes.png",type="png",units="in",bg="white",width=7,height=5,pointsize=10,dpi=300)
+a <- plot_genes_branched_heatmap(HSMM_all[Target_genes$gene_name,],num_clusters = 3,
+                                 branch_point = 1, cores = 2, use_gene_short_name = T,
+                                 show_rownames = T, return_heatmap =TRUE)
+a$g
+dev.off()
+
+#------Plot DE gene heatmap of metabolism and mitochodrial between cell fate (Figure 2 I)
+Top_12_gene <- c("Acot7","Avp","Mdh1","Cox7b","Hint1","Timm8b","Cox7c","Ndufs4","Ndufb3","Ndufab1","Aldoa","Timm13")
+cds <- HSMM_all[Top_12_gene,]
+col_vector <- c("#00D4F5","#18F500","#EC5700")
+Cairo(file="Plot_Pseudotime_Metabolism_and_Mitochodrial_Gene_State.png",type="png",units="in",bg="white",width=7,height=6,pointsize=10,dpi=300)
+plot_genes_branched_pseudotime(cds, color_by = "State",branch_point = 1,branch_labels = c("Cell fate 1","Cell fate 2"),
+                               ncol = 3) + 
+  scale_color_manual(values = col_vector) +
+  #scale_colour_gradient2(low="yellow",mid="Magenta2",high="red",midpoint = Average) +
+  #facet_wrap(~Group) +
+  #stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Plot target gene expression in trajectory. 
+Top_target_gene <- c("Sox2","Avp","Cwc22","Rbm5")
+cds <- HSMM_all[Top_target_gene,]
+Cairo(file="Plot_Pseudotime_Gene_State.png",type="png",units="in",bg="white",width=7,height=8,pointsize=10,dpi=300)
+plot_genes_branched_pseudotime(cds, color_by = "State",branch_point = 1,
+                               ncol = 2) + 
+  #scale_colour_gradient2(low="yellow",mid="Magenta2",high="red",midpoint = Average) +
+  #facet_wrap(~Group) +
+  #stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Charpter 4. Cell clusters and Cell Fates------
+#------plot trajectory by subcluster (Figure 3 A)
+pData(HSMM_all)$Ori_6_Cluster <- as.factor(pData(HSMM_all)$Ori_6_Cluster)
+Cairo(file="Plot_Trajectory_by_Subcluster_facet.png",type="png",units="in",bg="white",width=7,height=8,pointsize=5,dpi=300)
+plot_cell_trajectory(HSMM_all, 1, 2, color_by = "Ori_6_Cluster", cell_size = 0.5,state_number_size = 0.1,show_branch_points = TRUE) + 
+  facet_wrap(~Subcluster) +
+  stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.text=element_text(size=3)) + 
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#-----plot pseudotime by subcluster (Figure 3 B)
+Cairo(file="Plot_Trajectory_Pseudotime_by_subCluster.png",type="png",units="in",bg="white",width=7,height=8,pointsize=10,dpi=300)
+plot_cell_trajectory(HSMM_all, 1, 2, color_by = "Pseudotime", cell_size = 1,nrow = 2)+ 
+  scale_colour_gradient2(low="yellow",mid="Magenta2",high="red",midpoint = Average) +
+  facet_wrap(~Subcluster) +
+  stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Plot complicate tree structure of subcluster (Figure 3 C)
+Cairo(file="Plot_Tree_by_subCluster.png",type="png",units="in",bg="white",width=7,height=8,pointsize=10,dpi=300)
+plot_complex_cell_trajectory(HSMM_all, 1, 2, color_by = "Ori_6_Cluster", cell_size = 1,cell_link_size = 0.3)+ 
+  #scale_colour_gradient2(low="yellow",mid="Magenta2",high="red",midpoint = Average) +
+  facet_wrap(~Subcluster) +
+  #stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Plot ridge plot based on each subcluster (Figure 3 D)
+library(ggplot2)
+library(ggridges)
+theme_set(theme_ridges())
+Cairo(file="Cell_Fate_Distribution_based_on_subcluster.png",type="png",units="in",bg="white",width=7,height=6,pointsize=10,dpi=300)
+ggplot(pData(HSMM_all),aes(x=Pseudotime,y=Subcluster)) +
+  geom_density_ridges_gradient(aes(fill=..x..),scale=2.0,size = 0.2, rel_min_height = 0.0001, gradient_lwd = 1.0) +
+  scale_fill_gradientn(
+    colours = c("orange", "magenta2", "red"),
+    name = "Pseudotime"
+  ) +
+  scale_x_continuous(expand = c(0, 1)) +
+  scale_y_discrete(expand = c(0.5, 1)) +
+  #scale_fill_viridis_c(name="Pseudotime",option="C") +
+  expand_limits(x=c(0,15)) +
+  labs(title = 'Density of Pseudotime',
+       subtitle = 'Pseudotime of Cells in Each Subcluster', 
+       x = "Pseudotime") +
+  theme_ridges(font_size = 10, grid = TRUE, line_size = 0.1, center_axis_labels=TRUE) +
+  theme(panel.background=element_rect(fill='transparent', color='black'),
+        legend.key=element_rect(fill='transparent', color='transparent'))
+dev.off()
+
+#------Use The file of pData(HSMM_all) for statistcs between subclusters and pseudotime (Figure 3 E & F)
+write.table(pData(HSMM_all),"Important_statistics.txt",sep='\t',quote=FALSE,col.names = TRUE,row.names = TRUE)
+#Plot the bar plot statistics in SPSS.
+
+#------Charpter 5. Identify the contribution of genotype to the cell fate determination.------
+#------plot trajectory by subcluster and genotype (Figure 4 A)
+pData(HSMM_all)$Ori_6_Cluster <- as.factor(pData(HSMM_all)$Ori_6_Cluster)
+Cairo(file="Plot_Trajectory_by_genotype.png",type="png",units="in",bg="white",width=18,height=21,pointsize=5,dpi=300)
+plot_cell_trajectory(HSMM_all, 1, 2, color_by = "State", cell_size = 0.5,state_number_size = 0.1,show_branch_points = TRUE) + 
+  facet_wrap(~Group) +
+  stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.text=element_text(size=3)) + 
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#-----plot statistics of each genotype in cell fates in SPSS by Important_statistics.txt (Figure 4 B)
+
+#-----Plot Pseudotime of Trajectory based on subcluster and group (Figure 4 C)
+Cairo(file="Plot_Trajectory_Pseudotime_by_genotype.png",type="png",units="in",bg="white",width=18,height=21,pointsize=10,dpi=300)
+plot_cell_trajectory(HSMM_all, 1, 2, color_by = "Pseudotime", cell_size = 1,nrow = 2)+ 
+  scale_colour_gradient2(low="yellow",mid="Magenta2",high="red",midpoint = Average) +
+  facet_wrap(~Group) +
+  stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Plot ridge plot based on each Genotype (Figure 4 D)
+library(ggplot2)
+library(ggridges)
+theme_set(theme_ridges())
+Cairo(file="Cell_Fate_Distribution_based_on_genotype.png",type="png",units="in",bg="white",width=7,height=6,pointsize=10,dpi=300)
+ggplot(pData(HSMM_all),aes(x=Pseudotime,y=Subcluster)) +
+  geom_density_ridges_gradient(aes(fill=..x..),scale=2.0,size = 0.2, rel_min_height = 0.0001, gradient_lwd = 1.0) +
+  scale_fill_gradientn(
+    colours = c("orange", "magenta2", "red"),
+    name = "Pseudotime"
+  ) +
+  scale_x_continuous(expand = c(0, 1)) +
+  scale_y_discrete(expand = c(0.5, 1)) +
+  #scale_fill_viridis_c(name="Pseudotime",option="C") +
+  expand_limits(x=c(0,15)) +
+  labs(title = 'Density of Pseudotime',
+       subtitle = 'Pseudotime of Cells in Each Subcluster', 
+       x = "Pseudotime") +
+  theme_ridges(font_size = 10, grid = TRUE, line_size = 0.1, center_axis_labels=TRUE) +
+  theme(panel.background=element_rect(fill='transparent', color='black'),
+        legend.key=element_rect(fill='transparent', color='transparent'))
+dev.off()
+
+#------Plot complicate tree structure of subcluster and genotype (Figure 4 E)
+Cairo(file="Plot_Tree_by_subCluster_and_Group.png",type="png",units="in",bg="white",width=18,height=21,pointsize=10,dpi=300)
+plot_complex_cell_trajectory(HSMM_all, 1, 2, color_by = "Ori_6_Cluster", cell_size = 1,cell_link_size = 0.3)+ 
+  #scale_colour_gradient2(low="yellow",mid="Magenta2",high="red",midpoint = Average) +
+  facet_wrap(~Subcluster + Group) +
+  #stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Plot complicate tree structure of subcluster and genotype (Figure 4 E)
+Cairo(file="Plot_Tree_by_subCluster_and_Group.png",type="png",units="in",bg="white",width=18,height=21,pointsize=10,dpi=300)
+plot_complex_cell_trajectory(HSMM_all, 1, 2, color_by = "Ori_6_Cluster", cell_size = 1,cell_link_size = 0.3)+ 
+  #scale_colour_gradient2(low="yellow",mid="Magenta2",high="red",midpoint = Average) +
+  facet_wrap(~Subcluster + Group) +
+  #stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#------Plot trajectory of subcluster and genotype (Figure 4 F)
+pData(HSMM_all)$Ori_6_Cluster <- as.factor(pData(HSMM_all)$Ori_6_Cluster)
+Cairo(file="Plot_Trajectory_by_Subcluster_facet.png",type="png",units="in",bg="white",width=18,height=21,pointsize=5,dpi=300)
+plot_cell_trajectory(HSMM_all, 1, 2, color_by = "Ori_6_Cluster", cell_size = 0.5,state_number_size = 0.1,show_branch_points = TRUE) + 
+  facet_wrap(~Subcluster+Group) +
+  stat_density2d(color='black', h = 8, alpha=I(0.25), size=I(0.25)) +
+  theme(legend.text=element_text(size=3)) + 
+  theme(legend.position="top",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+dev.off()
+
+#-----Plot statistics of cell fate, genotype and subclusters in SPSS. (Figure 4 G)
